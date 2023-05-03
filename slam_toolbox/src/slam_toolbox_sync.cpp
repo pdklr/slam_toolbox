@@ -64,7 +64,7 @@ void SynchronousSlamToolbox::run()
         }
       }
       if(!queue_empty){
-        addScan(getLaser(scan_w_pose.scan), scan_w_pose);
+        //addScan(getLaser(scan_w_pose.scan), scan_w_pose);
         continue;
       }
     }

@@ -65,12 +65,12 @@ void LoopClosureAssistant::processInteractiveFeedback(const
   visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback)
 /*****************************************************************************/
 {
-  if (processor_type_ != PROCESS)
-  {
-    ROS_ERROR_THROTTLE(5.,
-      "Interactive mode is invalid outside processing mode.");
-    return;
-  }
+  // if (processor_type_ != PROCESS)
+  // {
+  //   ROS_ERROR_THROTTLE(5.,
+  //     "Interactive mode is invalid outside processing mode.");
+  //   return;
+  // }
 
   const int id = std::stoi(feedback->marker_name, nullptr, 10) - 1;
 
@@ -79,8 +79,109 @@ void LoopClosureAssistant::processInteractiveFeedback(const
       visualization_msgs::InteractiveMarkerFeedback::MOUSE_UP && 
       feedback->mouse_point_valid)
   {
-    addMovedNodes(id, Eigen::Vector3d(feedback->mouse_point.x,
-      feedback->mouse_point.y, tf2::getYaw(feedback->pose.orientation)));
+    // addMovedNodes(id, Eigen::Vector3d(feedback->mouse_point.x,
+    //   feedback->mouse_point.y, tf2::getYaw(feedback->pose.orientation)));
+  }
+
+  int static last_id = -1;
+  int static click_count = 0;
+  if (feedback->event_type ==
+      visualization_msgs::InteractiveMarkerFeedback::MOUSE_DOWN && 
+      feedback->mouse_point_valid)
+  {
+    if (last_id == id)
+    {
+      click_count++;
+    }
+    else
+    {
+      click_count = 1;
+    }
+    last_id = id;
+
+    ROS_WARN_STREAM("Click count " << click_count);
+  }
+
+  bool delete_lc = false;
+
+  // was depressed, something moved, and now released
+  if (feedback->event_type ==
+      visualization_msgs::InteractiveMarkerFeedback::MOUSE_DOWN && 
+      feedback->mouse_point_valid)
+  {
+    if (click_count < 3)
+    {
+      return;
+    }
+
+    karto::Edge<karto::LocalizedRangeScan>* lc_edge = NULL;
+    karto::Vertex<karto::LocalizedRangeScan>* vert = mapper_->GetGraph()->GetVertices().begin()->second.at(id);
+    if (vert->GetAdjacentVertices().size() > 2)
+    {
+      for (const auto& edge : vert->GetEdges())
+      {
+        if (edge->GetSource()->GetAdjacentVertices().size() > 2
+            && edge->GetTarget()->GetAdjacentVertices().size() > 2)
+        {
+          ROS_WARN_STREAM("Found Loop Closure Edge");
+          lc_edge = edge;
+        }
+      }
+    }
+
+    if (lc_edge != NULL)
+    {
+      delete_lc = true;
+      click_count = 0;
+
+      {
+        auto it = std::find(lc_edge->GetSource()->GetEdges().begin(), lc_edge->GetSource()->GetEdges().end(), lc_edge);
+        if (it != lc_edge->GetSource()->GetEdges().end())
+        {
+          ROS_WARN_STREAM("Deleting Edge from Source");
+          int index = std::distance(lc_edge->GetSource()->GetEdges().begin(), it);
+          lc_edge->GetSource()->RemoveEdge(index);
+        }
+      }
+      {
+        auto it = std::find(lc_edge->GetTarget()->GetEdges().begin(), lc_edge->GetTarget()->GetEdges().end(), lc_edge);
+        if (it != lc_edge->GetTarget()->GetEdges().end())
+        {
+          ROS_WARN_STREAM("Deleting Edge from Target");
+          int index = std::distance(lc_edge->GetTarget()->GetEdges().begin(), it);
+          lc_edge->GetTarget()->RemoveEdge(index);
+        }
+      }
+
+      for (int i = 0; i < mapper_->GetGraph()->GetEdges().size(); i++)
+      {
+        if (lc_edge == mapper_->GetGraph()->GetEdges().at(i))
+        {
+          ROS_WARN_STREAM("Removing Edge from Graph");
+          mapper_->GetGraph()->RemoveEdge(i);
+          break;
+        }
+      }
+
+      mapper_->getScanSolver()->RemoveConstraint(lc_edge->GetSource()->GetObject()->GetStateId(),
+        lc_edge->GetTarget()->GetObject()->GetStateId());
+    }
+  }
+
+  if (feedback->event_type ==
+      visualization_msgs::InteractiveMarkerFeedback::MOUSE_DOWN && 
+      feedback->mouse_point_valid)
+  {
+    if (click_count < 3 || delete_lc)
+    {
+      return;
+    }
+    click_count = 0;
+
+    karto::Vertex<karto::LocalizedRangeScan>* vert = mapper_->GetGraph()->GetVertices().begin()->second.at(id);
+    bool found_closure = mapper_->TryCloseLoop(vert->GetObject(), vert->GetObject()->GetSensorName());
+
+    ROS_WARN_STREAM("Found Closure " << (found_closure ? "true" : "false"));
   }
 
   // is currently depressed, being moved before release
@@ -131,6 +232,7 @@ void LoopClosureAssistant::processInteractiveFeedback(const
 void LoopClosureAssistant::publishGraph()
 /*****************************************************************************/
 {
+  ROS_WARN_STREAM("Pub Graph");
   interactive_server_->clear();
   karto::MapperGraph * graph = mapper_->GetGraph();
 
@@ -219,6 +321,23 @@ void LoopClosureAssistant::publishGraph()
       edge_marker.points[0].y = source_pose.GetY();
       edge_marker.points[1].x = target_pose.GetX();
       edge_marker.points[1].y = target_pose.GetY();
+
+      if (edge->GetSource()->GetEdges().size() > 2
+          && edge->GetTarget()->GetEdges().size() > 2)
+      {
+        edge_marker.color.a = 1;
+        edge_marker.color.r = 0;
+        edge_marker.color.g = 1;
+        edge_marker.color.b = 0;
+      }
+      else
+      {
+        edge_marker.color.a = 1;
+        edge_marker.color.r = 0;
+        edge_marker.color.g = 0;
+        edge_marker.color.b = 1;
+      }
+
       marker_array_.markers.push_back(edge_marker);
     }
   }
@@ -259,28 +378,28 @@ bool LoopClosureAssistant::manualLoopClosureCallback(
   {
     boost::mutex::scoped_lock lock(moved_nodes_mutex_);
 
-    if (moved_nodes_.size() == 0)
-    {
-      ROS_WARN("No moved nodes to attempt manual loop closure.");
-      return true;
-    }
+    // if (moved_nodes_.size() == 0)
+    // {
+    //   ROS_WARN("No moved nodes to attempt manual loop closure.");
+    //   return true;
+    // }
 
-    ROS_INFO("LoopClosureAssistant: Attempting to manual "
-      "loop close with %i moved nodes.", (int)moved_nodes_.size());
-    // for each in node map
-    std::map<int, Eigen::Vector3d>::const_iterator it = moved_nodes_.begin();
-    for (it; it != moved_nodes_.end(); ++it)
-    {
-      moveNode(it->first,
-        Eigen::Vector3d(it->second(0),it->second(1), it->second(2)));
-    }
+    // ROS_INFO("LoopClosureAssistant: Attempting to manual "
+    //   "loop close with %i moved nodes.", (int)moved_nodes_.size());
+    // // for each in node map
+    // std::map<int, Eigen::Vector3d>::const_iterator it = moved_nodes_.begin();
+    // for (it; it != moved_nodes_.end(); ++it)
+    // {
+    //   moveNode(it->first,
+    //     Eigen::Vector3d(it->second(0),it->second(1), it->second(2)));
+    // }
   }
 
   // optimize
   mapper_->CorrectPoses();
 
   // update visualization and clear out nodes completed
-  publishGraph();  
+  publishGraph();
   clearMovedNodes();
   return true;
 }

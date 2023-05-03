@@ -21,6 +21,8 @@
 #include "slam_toolbox/slam_toolbox_common.hpp"
 #include "slam_toolbox/serialization.hpp"
 
+#include "karto_sdk/Karto.h"
+
 namespace slam_toolbox
 {
 
@@ -768,7 +770,31 @@ bool SlamToolbox::deserializePoseGraphCallback(
       "file: %s.", filename.c_str());
     return true;
   }
-  ROS_DEBUG("DeserializePoseGraph: Successfully read file.");
+  ROS_WARN("DeserializePoseGraph: Successfully read file.");
+
+  // fill scan holder
+  ::karto::LocalizedRangeScanVector scans = mapper->GetAllProcessedScans();
+  ::karto::RangeReadingsVector readings = scans.at(0)->GetRangeReadingsVector();
+  ROS_WARN_STREAM("scan size " << scans.size());
+  ROS_WARN_STREAM("readings size " << readings.size());
+
+  for(const ::karto::LocalizedRangeScan* scan: scans)
+  {
+    sensor_msgs::LaserScan msg;
+    msg.header.frame_id = "base_link";
+    msg.angle_min = -3.1415927410125732;
+    msg.angle_max = 3.1328659057617188;
+    msg.angle_increment = 0.008726646192371845;
+    msg.time_increment = 0.0;
+    msg.scan_time = 0.0299999;
+    msg.range_min = 0.1;
+    msg.range_max = 40.0;
+    for (const double reading : scan->GetRangeReadingsVector())
+    {
+      msg.ranges.push_back(reading);
+    }
+    scan_holder_->addScan(msg);
+  }
 
   loadSerializedPoseGraph(mapper, dataset);
   updateMap();
