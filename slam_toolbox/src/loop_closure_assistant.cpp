@@ -99,7 +99,7 @@ void LoopClosureAssistant::processInteractiveFeedback(const
     }
     last_id = id;
 
-    ROS_WARN_STREAM("Click count " << click_count);
+    ROS_WARN_STREAM("Click count " << click_count << ", node: " << id);
   }
 
   bool delete_lc = false;
@@ -214,16 +214,19 @@ void LoopClosureAssistant::processInteractiveFeedback(const
       feedback->pose.position.y, 0.));
     transform.setRotation(quat);
 
+    static int nsec_offset = 1000;
+    nsec_offset--;
+
     // publish the scan visualization with transform
     geometry_msgs::TransformStamped msg;
     tf2::convert(transform, msg.transform);
     msg.child_frame_id = "karto_scan_visualization";
     msg.header.frame_id = feedback->header.frame_id;
-    msg.header.stamp = ros::Time::now();
+    msg.header.stamp = ros::Time::now() + ros::Duration(0, nsec_offset);
     tfB_->sendTransform(msg);
 
     scan.header.frame_id = "karto_scan_visualization";
-    scan.header.stamp = ros::Time::now();
+    scan.header.stamp = ros::Time::now() + ros::Duration(0, nsec_offset);
     scan_publisher_.publish(scan);
   }
 }
@@ -232,7 +235,6 @@ void LoopClosureAssistant::processInteractiveFeedback(const
 void LoopClosureAssistant::publishGraph()
 /*****************************************************************************/
 {
-  ROS_WARN_STREAM("Pub Graph");
   interactive_server_->clear();
   karto::MapperGraph * graph = mapper_->GetGraph();
 
@@ -281,6 +283,9 @@ void LoopClosureAssistant::publishGraph()
       {
         // need a 1-to-1 mapping between marker IDs and
         // scan unique IDs to process interactive feedback
+        vertex_marker.scale.x = .15;
+        vertex_marker.scale.y = .15;
+        vertex_marker.scale.z = .15;
         vertex_marker.id = scan->GetUniqueId() + 1;
         visualization_msgs::InteractiveMarker int_marker =
           vis_utils::toInteractiveMarker(vertex_marker, 0.3);
@@ -305,7 +310,7 @@ void LoopClosureAssistant::publishGraph()
     using ConstEdgeListIterator = EdgeList::const_iterator;
 
     visualization_msgs::Marker edge_marker =
-      vis_utils::toEdgeMarker(map_frame_, "slam_toolbox", 0.05);
+      vis_utils::toEdgeMarker(map_frame_, "slam_toolbox", 0.01);
 
     const EdgeList& edges = graph->GetEdges();
     for (ConstEdgeListIterator it = edges.begin(); it != edges.end(); ++it)
@@ -322,20 +327,32 @@ void LoopClosureAssistant::publishGraph()
       edge_marker.points[1].x = target_pose.GetX();
       edge_marker.points[1].y = target_pose.GetY();
 
-      if (edge->GetSource()->GetEdges().size() > 2
-          && edge->GetTarget()->GetEdges().size() > 2)
+      bool consecutive_scans = target_scan->GetStateId() - source_scan->GetStateId() == 1;
+      double distance = hypot(edge_marker.points[0].x - edge_marker.points[1].x, edge_marker.points[0].y - edge_marker.points[1].y);
+
+      // Crude check to find edges from continue mapping
+      if (consecutive_scans && distance > 1.5)
       {
+        // Those edges can cause faulty constrains so we delete them
+        deleteEdge(edge);
         edge_marker.color.a = 1;
-        edge_marker.color.r = 0;
-        edge_marker.color.g = 1;
+        edge_marker.color.r = 1;
+        edge_marker.color.g = 0;
         edge_marker.color.b = 0;
       }
-      else
+      else if (consecutive_scans)
       {
         edge_marker.color.a = 1;
         edge_marker.color.r = 0;
         edge_marker.color.g = 0;
         edge_marker.color.b = 1;
+      }
+      else
+      {
+        edge_marker.color.a = 1;
+        edge_marker.color.r = 0;
+        edge_marker.color.g = 1;
+        edge_marker.color.b = 0;
       }
 
       marker_array_.markers.push_back(edge_marker);
@@ -479,6 +496,64 @@ void LoopClosureAssistant::addMovedNodes(const int& id, Eigen::Vector3d vec)
     "pose has been recorded.",id);
   boost::mutex::scoped_lock lock(moved_nodes_mutex_);
   moved_nodes_[id] = vec;
+}
+
+/*****************************************************************************/
+bool LoopClosureAssistant::deleteEdge(const karto::Edge<karto::LocalizedRangeScan>* edge)
+/*****************************************************************************/
+{
+  int edge_idx_on_source, edge_idx_on_target, edge_idx_in_graph;
+  const kt_int32s source_id = edge->GetSource()->GetObject()->GetStateId();
+  const kt_int32s target_id = edge->GetTarget()->GetObject()->GetStateId();
+
+  {
+    auto it = std::find(edge->GetSource()->GetEdges().begin(), edge->GetSource()->GetEdges().end(), edge);
+    if (it != edge->GetSource()->GetEdges().end())
+    {
+      edge_idx_on_source = std::distance(edge->GetSource()->GetEdges().begin(), it);
+    }
+    else
+    {
+      ROS_ERROR("LoopClosureAssistant: Did not find edge on source "
+        "node %i to delete.", source_id);
+      return false;
+    }
+  }
+
+  {
+    auto it = std::find(edge->GetTarget()->GetEdges().begin(), edge->GetTarget()->GetEdges().end(), edge);
+    if (it != edge->GetTarget()->GetEdges().end())
+    {
+      edge_idx_on_target = std::distance(edge->GetTarget()->GetEdges().begin(), it);
+    }
+    else
+    {
+      ROS_ERROR("LoopClosureAssistant: Did not find edge on target "
+        "node %i to delete.", target_id);
+      return false;
+    }
+  }
+
+  {
+    auto it = std::find(mapper_->GetGraph()->GetEdges().begin(), mapper_->GetGraph()->GetEdges().end(), edge);
+    if (it != edge->GetTarget()->GetEdges().end())
+    {
+      edge_idx_in_graph = std::distance(mapper_->GetGraph()->GetEdges().begin(), it);
+    }
+    else
+    {
+      ROS_ERROR("LoopClosureAssistant: Did not find edge from %i to %i in graph"
+        " to delete.", source_id, target_id);
+      return false;
+    }
+  }
+
+  edge->GetSource()->RemoveEdge(edge_idx_on_source);
+  edge->GetTarget()->RemoveEdge(edge_idx_on_target);
+  mapper_->GetGraph()->RemoveEdge(edge_idx_in_graph);
+  mapper_->getScanSolver()->RemoveConstraint(source_id, target_id);
+
+  return true;
 }
 
 } // end namespace

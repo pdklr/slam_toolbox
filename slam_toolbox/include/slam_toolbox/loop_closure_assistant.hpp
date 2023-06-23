@@ -55,6 +55,7 @@ private:
   bool interactiveModeCallback(slam_toolbox_msgs::ToggleInteractive::Request  &req, slam_toolbox_msgs::ToggleInteractive::Response &resp);
   void moveNode(const int& id, const Eigen::Vector3d& pose);
   void addMovedNodes(const int& id, Eigen::Vector3d vec);
+  bool deleteEdge(const karto::Edge<karto::LocalizedRangeScan>* edge);
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tfB_;
   laser_utils::ScanHolder* scan_holder_;

@@ -1548,9 +1548,13 @@ namespace karto
     kt_int32u scanIndex = 0;
 
     LocalizedRangeScanVector candidateChain = FindPossibleLoopClosure(pScan, rSensorName, scanIndex);
-
+    static int candidateCount = 0;
     while (!candidateChain.empty())
     {
+      candidateCount++;
+      #ifdef KARTO_DEBUG
+        std::cout << "Searching candidate " << candidateCount << std::endl;
+      #endif
       Pose2 bestPose;
       Matrix3 covariance;
       kt_double coarseResponse = m_pLoopScanMatcher->MatchScan(pScan, candidateChain,
@@ -1562,7 +1566,9 @@ namespace karto
              << std::endl;
       stream << "            var: " << covariance(0, 0) << ",  " << covariance(1, 1)
              << " (< " << m_pMapper->m_pLoopMatchMaximumVarianceCoarse->GetValue() << ")";
-
+      #ifdef KARTO_DEBUG
+        std::cout << stream.str() << std::endl;
+      #endif
       m_pMapper->FireLoopClosureCheck(stream.str());
 
       if ((coarseResponse > m_pMapper->m_pLoopMatchMinimumResponseCoarse->GetValue()) &&
@@ -1582,6 +1588,9 @@ namespace karto
         stream1 << "FINE RESPONSE: " << fineResponse << " (>"
                 << m_pMapper->m_pLoopMatchMinimumResponseFine->GetValue() << ")" << std::endl;
         m_pMapper->FireLoopClosureCheck(stream1.str());
+        #ifdef KARTO_DEBUG
+          std::cout << stream1.str() << std::endl;
+        #endif
 
         if (fineResponse < m_pMapper->m_pLoopMatchMinimumResponseFine->GetValue())
         {
@@ -1603,6 +1612,11 @@ namespace karto
 
       candidateChain = FindPossibleLoopClosure(pScan, rSensorName, scanIndex);
     }
+
+    #ifdef KARTO_DEBUG
+      std::cout << "Searched total of candidates " << candidateCount << std::endl;
+    #endif
+    candidateCount = 0;
 
     return loopClosed;
   }
@@ -2011,16 +2025,35 @@ namespace karto
 
       Pose2 candidateScanPose = pCandidateScan->GetReferencePose(m_pMapper->m_pUseScanBarycenter->GetValue());
 
+      bool chainDiscontinued = false;
+      try
+      {
+        const auto& adjacentVertices = GetVertex(pCandidateScan)->GetAdjacentVertices();
+        chainDiscontinued = !chain.empty() && adjacentVertices.end() ==
+                                  std::find(adjacentVertices.begin(), adjacentVertices.end(), GetVertex(chain.back()));
+      }
+      catch(const std::exception& e)
+      {
+        std::cerr << e.what() << '\n';
+      }
+
       kt_double squaredDistance = candidateScanPose.GetPosition().SquaredDistance(pose.GetPosition());
-      if (squaredDistance < math::Square(m_pMapper->m_pLoopSearchMaximumDistance->GetValue()) + KT_TOLERANCE)
+      if (squaredDistance < math::Square(m_pMapper->m_pLoopSearchMaximumDistance->GetValue()) + KT_TOLERANCE
+          && !chainDiscontinued)
       {
         // a linked scan cannot be in the chain
         if (find(nearLinkedScans.begin(), nearLinkedScans.end(), pCandidateScan) != nearLinkedScans.end())
         {
+          // if(chain.size() >= 10)
+          // {
+          //   std::cout << "Discarding chain from " << chain.front()->GetUniqueId() << " to " << chain.back()->GetUniqueId() << std::endl;
+          //   std::cout << "Scan is part of near linked " << pCandidateScan->GetUniqueId();
+          // }
           chain.clear();
         }
         else
         {
+          //std::cout << "Added " << pCandidateScan->GetUniqueId() << " to chain with " << std::sqrt(squaredDistance) << std::endl;
           chain.push_back(pCandidateScan);
         }
       }
@@ -2029,10 +2062,13 @@ namespace karto
         // return chain if it is long "enough"
         if (chain.size() >= m_pMapper->m_pLoopMatchMinimumChainSize->GetValue())
         {
+          //std::cout << "Returning chain from " << chain.front()->GetUniqueId() << " to " << chain.back()->GetUniqueId() << std::endl;
           return chain;
         }
         else
         {
+          // if (chain.size() > 3)
+          //   std::cout << "Discarding chain" << std::endl;
           chain.clear();
         }
       }
